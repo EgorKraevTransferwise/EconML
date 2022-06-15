@@ -39,20 +39,33 @@ from copy import deepcopy
 
 import numpy as np
 from sklearn.base import clone
-from sklearn.linear_model import (LassoCV, LinearRegression,
-                                  LogisticRegressionCV)
+from sklearn.linear_model import LassoCV, LinearRegression, LogisticRegressionCV
+
+from flaml import tune
 from sklearn.ensemble import RandomForestRegressor
 
 from .._ortho_learner import _OrthoLearner
-from .._cate_estimator import (DebiasedLassoCateEstimatorDiscreteMixin,
-                               ForestModelFinalCateEstimatorDiscreteMixin,
-                               StatsModelsCateEstimatorDiscreteMixin, LinearCateEstimator)
+from .._cate_estimator import (
+    DebiasedLassoCateEstimatorDiscreteMixin,
+    ForestModelFinalCateEstimatorDiscreteMixin,
+    StatsModelsCateEstimatorDiscreteMixin,
+    LinearCateEstimator,
+)
 from ..inference import GenericModelFinalInferenceDiscrete
 from ..grf import RegressionForest
 from ..sklearn_extensions.linear_model import (
-    DebiasedLasso, StatsModelsLinearRegression, WeightedLassoCVWrapper)
-from ..utilities import (_deprecate_positional, check_high_dimensional,
-                         filter_none_kwargs, fit_with_groups, inverse_onehot, get_feature_names_or_default)
+    DebiasedLasso,
+    StatsModelsLinearRegression,
+    WeightedLassoCVWrapper,
+)
+from ..utilities import (
+    _deprecate_positional,
+    check_high_dimensional,
+    filter_none_kwargs,
+    fit_with_groups,
+    inverse_onehot,
+    get_feature_names_or_default,
+)
 from .._shap import _shap_explain_multitask_model_cate, _shap_explain_model_cate
 
 
@@ -67,30 +80,50 @@ class _ModelNuisance:
 
     def fit(self, Y, T, X=None, W=None, *, sample_weight=None, groups=None):
         if Y.ndim != 1 and (Y.ndim != 2 or Y.shape[1] != 1):
-            raise ValueError("The outcome matrix must be of shape ({0}, ) or ({0}, 1), "
-                             "instead got {1}.".format(len(X), Y.shape))
+            raise ValueError(
+                "The outcome matrix must be of shape ({0}, ) or ({0}, 1), "
+                "instead got {1}.".format(len(X), Y.shape)
+            )
         if (X is None) and (W is None):
             raise AttributeError("At least one of X or W has to not be None!")
         if np.any(np.all(T == 0, axis=0)) or (not np.any(np.all(T == 0, axis=1))):
-            raise AttributeError("Provided crossfit folds contain training splits that " +
-                                 "don't contain all treatments")
+            raise AttributeError(
+                "Provided crossfit folds contain training splits that "
+                + "don't contain all treatments"
+            )
         XW = self._combine(X, W)
         filtered_kwargs = filter_none_kwargs(sample_weight=sample_weight)
 
-        fit_with_groups(self._model_propensity, XW, inverse_onehot(T), groups=groups, **filtered_kwargs)
-        fit_with_groups(self._model_regression, np.hstack([XW, T]), Y, groups=groups, **filtered_kwargs)
+        fit_with_groups(
+            self._model_propensity,
+            XW,
+            inverse_onehot(T),
+            groups=groups,
+            **filtered_kwargs
+        )
+        fit_with_groups(
+            self._model_regression,
+            np.hstack([XW, T]),
+            Y,
+            groups=groups,
+            **filtered_kwargs
+        )
         return self
 
     def score(self, Y, T, X=None, W=None, *, sample_weight=None, groups=None):
         XW = self._combine(X, W)
         filtered_kwargs = filter_none_kwargs(sample_weight=sample_weight)
 
-        if hasattr(self._model_propensity, 'score'):
-            propensity_score = self._model_propensity.score(XW, inverse_onehot(T), **filtered_kwargs)
+        if hasattr(self._model_propensity, "score"):
+            propensity_score = self._model_propensity.score(
+                XW, inverse_onehot(T), **filtered_kwargs
+            )
         else:
             propensity_score = None
-        if hasattr(self._model_regression, 'score'):
-            regression_score = self._model_regression.score(np.hstack([XW, T]), Y, **filtered_kwargs)
+        if hasattr(self._model_regression, "score"):
+            regression_score = self._model_regression.score(
+                np.hstack([XW, T]), Y, **filtered_kwargs
+            )
         else:
             regression_score = None
 
@@ -98,20 +131,34 @@ class _ModelNuisance:
 
     def predict(self, Y, T, X=None, W=None, *, sample_weight=None, groups=None):
         XW = self._combine(X, W)
-        propensities = np.maximum(self._model_propensity.predict_proba(XW), self._min_propensity)
+        propensities = np.maximum(
+            self._model_propensity.predict_proba(XW), self._min_propensity
+        )
         n = T.shape[0]
         Y_pred = np.zeros((T.shape[0], T.shape[1] + 1))
         T_counter = np.zeros(T.shape)
-        Y_pred[:, 0] = self._model_regression.predict(np.hstack([XW, T_counter])).reshape(n)
-        Y_pred[:, 0] += (Y.reshape(n) - Y_pred[:, 0]) * np.all(T == 0, axis=1) / propensities[:, 0]
+        Y_pred[:, 0] = self._model_regression.predict(
+            np.hstack([XW, T_counter])
+        ).reshape(n)
+        Y_pred[:, 0] += (
+            (Y.reshape(n) - Y_pred[:, 0]) * np.all(T == 0, axis=1) / propensities[:, 0]
+        )
         for t in np.arange(T.shape[1]):
             T_counter = np.zeros(T.shape)
             T_counter[:, t] = 1
-            Y_pred[:, t + 1] = self._model_regression.predict(np.hstack([XW, T_counter])).reshape(n)
-            Y_pred[:, t + 1] += (Y.reshape(n) - Y_pred[:, t + 1]) * (T[:, t] == 1) / propensities[:, t + 1]
+            Y_pred[:, t + 1] = self._model_regression.predict(
+                np.hstack([XW, T_counter])
+            ).reshape(n)
+            Y_pred[:, t + 1] += (
+                (Y.reshape(n) - Y_pred[:, t + 1])
+                * (T[:, t] == 1)
+                / propensities[:, t + 1]
+            )
         T_complete = np.hstack(((np.all(T == 0, axis=1) * 1).reshape(-1, 1), T))
         propensities_weight = np.sum(propensities * T_complete, axis=1)
-        return Y_pred.reshape(Y.shape + (T.shape[1] + 1,)), propensities_weight.reshape((n,))
+        return Y_pred.reshape(Y.shape + (T.shape[1] + 1,)), propensities_weight.reshape(
+            (n,)
+        )
 
 
 class _ModelFinal:
@@ -126,30 +173,61 @@ class _ModelFinal:
         self._multitask_model_final = multitask_model_final
         return
 
-    def fit(self, Y, T, X=None, W=None, *, nuisances,
-            sample_weight=None, freq_weight=None, sample_var=None, groups=None):
+    def fit(
+        self,
+        Y,
+        T,
+        X=None,
+        W=None,
+        *,
+        nuisances,
+        sample_weight=None,
+        freq_weight=None,
+        sample_var=None,
+        groups=None
+    ):
         Y_pred, propensities = nuisances
-        self.d_y = Y_pred.shape[1:-1]  # track whether there's a Y dimension (must be a singleton)
-        self.d_t = Y_pred.shape[-1] - 1  # track # of treatment (exclude baseline treatment)
+        self.d_y = Y_pred.shape[
+            1:-1
+        ]  # track whether there's a Y dimension (must be a singleton)
+        self.d_t = (
+            Y_pred.shape[-1] - 1
+        )  # track # of treatment (exclude baseline treatment)
         if (X is not None) and (self._featurizer is not None):
             X = self._featurizer.fit_transform(X)
 
         if self._multitask_model_final:
-            ys = Y_pred[..., 1:] - Y_pred[..., [0]]  # subtract control results from each other arm
+            ys = (
+                Y_pred[..., 1:] - Y_pred[..., [0]]
+            )  # subtract control results from each other arm
             if self.d_y:  # need to squeeze out singleton so that we fit on 2D array
                 ys = ys.squeeze(1)
-            weighted_sample_var = np.tile((sample_var / propensities**2).reshape((-1, 1)),
-                                          self.d_t) if sample_var is not None else None
-            filtered_kwargs = filter_none_kwargs(sample_weight=sample_weight,
-                                                 freq_weight=freq_weight, sample_var=weighted_sample_var)
+            weighted_sample_var = (
+                np.tile((sample_var / propensities**2).reshape((-1, 1)), self.d_t)
+                if sample_var is not None
+                else None
+            )
+            filtered_kwargs = filter_none_kwargs(
+                sample_weight=sample_weight,
+                freq_weight=freq_weight,
+                sample_var=weighted_sample_var,
+            )
             self.model_cate = self._model_final.fit(X, ys, **filtered_kwargs)
         else:
-            weighted_sample_var = sample_var / propensities**2 if sample_var is not None else None
-            filtered_kwargs = filter_none_kwargs(sample_weight=sample_weight,
-                                                 freq_weight=freq_weight, sample_var=weighted_sample_var)
-            self.models_cate = [clone(self._model_final, safe=False).fit(X, Y_pred[..., t] - Y_pred[..., 0],
-                                                                         **filtered_kwargs)
-                                for t in np.arange(1, Y_pred.shape[-1])]
+            weighted_sample_var = (
+                sample_var / propensities**2 if sample_var is not None else None
+            )
+            filtered_kwargs = filter_none_kwargs(
+                sample_weight=sample_weight,
+                freq_weight=freq_weight,
+                sample_var=weighted_sample_var,
+            )
+            self.models_cate = [
+                clone(self._model_final, safe=False).fit(
+                    X, Y_pred[..., t] - Y_pred[..., 0], **filtered_kwargs
+                )
+                for t in np.arange(1, Y_pred.shape[-1])
+            ]
         return self
 
     def predict(self, X=None):
@@ -161,10 +239,14 @@ class _ModelFinal:
                 return pred[:, np.newaxis, :]
             return pred
         else:
-            preds = np.array([mdl.predict(X).reshape((-1,) + self.d_y) for mdl in self.models_cate])
+            preds = np.array(
+                [mdl.predict(X).reshape((-1,) + self.d_y) for mdl in self.models_cate]
+            )
             return np.moveaxis(preds, 0, -1)  # move treatment dim to end
 
-    def score(self, Y, T, X=None, W=None, *, nuisances, sample_weight=None, groups=None):
+    def score(
+        self, Y, T, X=None, W=None, *, nuisances, sample_weight=None, groups=None
+    ):
         if (X is not None) and (self._featurizer is not None):
             X = self._featurizer.transform(X)
         Y_pred, _ = nuisances
@@ -173,7 +255,11 @@ class _ModelFinal:
             cate_pred = self.model_cate.predict(X).reshape((-1, self.d_t))
             if self.d_y:
                 cate_pred = cate_pred[:, np.newaxis, :]
-            return np.mean(np.average((Y_pred_diff - cate_pred)**2, weights=sample_weight, axis=0))
+            return np.mean(
+                np.average(
+                    (Y_pred_diff - cate_pred) ** 2, weights=sample_weight, axis=0
+                )
+            )
 
         else:
             scores = []
@@ -181,7 +267,9 @@ class _ModelFinal:
                 # since we only allow single dimensional y, we could flatten the prediction
                 Y_pred_diff = (Y_pred[..., t] - Y_pred[..., 0]).flatten()
                 cate_pred = self.models_cate[t - 1].predict(X).flatten()
-                score = np.average((Y_pred_diff - cate_pred)**2, weights=sample_weight, axis=0)
+                score = np.average(
+                    (Y_pred_diff - cate_pred) ** 2, weights=sample_weight, axis=0
+                )
                 scores.append(score)
             return np.mean(scores)
 
@@ -398,31 +486,36 @@ class DRLearner(_OrthoLearner):
 
     """
 
-    def __init__(self, *,
-                 model_propensity='auto',
-                 model_regression='auto',
-                 model_final=StatsModelsLinearRegression(),
-                 multitask_model_final=False,
-                 featurizer=None,
-                 min_propensity=1e-6,
-                 categories='auto',
-                 cv=2,
-                 mc_iters=None,
-                 mc_agg='mean',
-                 random_state=None):
+    def __init__(
+        self,
+        *,
+        model_propensity="auto",
+        model_regression="auto",
+        model_final=StatsModelsLinearRegression(),
+        multitask_model_final=False,
+        featurizer=None,
+        min_propensity=1e-6,
+        categories="auto",
+        cv=2,
+        mc_iters=None,
+        mc_agg="mean",
+        random_state=None
+    ):
         self.model_propensity = clone(model_propensity, safe=False)
         self.model_regression = clone(model_regression, safe=False)
         self.model_final = clone(model_final, safe=False)
         self.multitask_model_final = multitask_model_final
         self.featurizer = clone(featurizer, safe=False)
         self.min_propensity = min_propensity
-        super().__init__(cv=cv,
-                         mc_iters=mc_iters,
-                         mc_agg=mc_agg,
-                         discrete_treatment=True,
-                         discrete_instrument=False,  # no instrument, so doesn't matter
-                         categories=categories,
-                         random_state=random_state)
+        super().__init__(
+            cv=cv,
+            mc_iters=mc_iters,
+            mc_agg=mc_agg,
+            discrete_treatment=True,
+            discrete_instrument=False,  # no instrument, so doesn't matter
+            categories=categories,
+            random_state=random_state,
+        )
 
     def _get_inference_options(self):
         options = super()._get_inference_options()
@@ -433,14 +526,17 @@ class DRLearner(_OrthoLearner):
         return options
 
     def _gen_ortho_learner_model_nuisance(self):
-        if self.model_propensity == 'auto':
-            model_propensity = LogisticRegressionCV(cv=3, solver='lbfgs', multi_class='auto',
-                                                    random_state=self.random_state)
+        if self.model_propensity == "auto":
+            model_propensity = LogisticRegressionCV(
+                cv=3, solver="lbfgs", multi_class="auto", random_state=self.random_state
+            )
         else:
             model_propensity = clone(self.model_propensity, safe=False)
 
-        if self.model_regression == 'auto':
-            model_regression = WeightedLassoCVWrapper(cv=3, random_state=self.random_state)
+        if self.model_regression == "auto":
+            model_regression = WeightedLassoCVWrapper(
+                cv=3, random_state=self.random_state
+            )
         else:
             model_regression = clone(self.model_regression, safe=False)
 
@@ -453,10 +549,24 @@ class DRLearner(_OrthoLearner):
         return clone(self.model_final, safe=False)
 
     def _gen_ortho_learner_model_final(self):
-        return _ModelFinal(self._gen_model_final(), self._gen_featurizer(), self.multitask_model_final)
+        return _ModelFinal(
+            self._gen_model_final(), self._gen_featurizer(), self.multitask_model_final
+        )
 
-    def fit(self, Y, T, *, X=None, W=None, sample_weight=None, freq_weight=None, sample_var=None, groups=None,
-            cache_values=False, inference='auto'):
+    def fit(
+        self,
+        Y,
+        T,
+        *,
+        X=None,
+        W=None,
+        sample_weight=None,
+        freq_weight=None,
+        sample_var=None,
+        groups=None,
+        cache_values=False,
+        inference="auto"
+    ):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -494,12 +604,22 @@ class DRLearner(_OrthoLearner):
         self: DRLearner instance
         """
         # Replacing fit from _OrthoLearner, to enforce Z=None and improve the docstring
-        return super().fit(Y, T, X=X, W=W,
-                           sample_weight=sample_weight, freq_weight=freq_weight, sample_var=sample_var, groups=groups,
-                           cache_values=cache_values, inference=inference)
+        return super().fit(
+            Y,
+            T,
+            X=X,
+            W=W,
+            sample_weight=sample_weight,
+            freq_weight=freq_weight,
+            sample_var=sample_var,
+            groups=groups,
+            cache_values=cache_values,
+            inference=inference,
+        )
 
-    def refit_final(self, *, inference='auto'):
+    def refit_final(self, *, inference="auto"):
         return super().refit_final(inference=inference)
+
     refit_final.__doc__ = _OrthoLearner.refit_final.__doc__
 
     def score(self, Y, T, X=None, W=None, sample_weight=None):
@@ -545,7 +665,9 @@ class DRLearner(_OrthoLearner):
             Available only when multitask_model_final=True.
         """
         if not self.ortho_learner_model_final_._multitask_model_final:
-            raise AttributeError("Separate CATE models were fitted for each treatment! Use model_cate.")
+            raise AttributeError(
+                "Separate CATE models were fitted for each treatment! Use model_cate."
+            )
         return self.ortho_learner_model_final_.model_cate
 
     def model_cate(self, T=1):
@@ -564,7 +686,9 @@ class DRLearner(_OrthoLearner):
             to the CATE model for treatment T=t, compared to baseline. Available when multitask_model_final=False.
         """
         if self.ortho_learner_model_final_._multitask_model_final:
-            raise AttributeError("A single multitask model was fitted for all treatments! Use multitask_model_cate.")
+            raise AttributeError(
+                "A single multitask model was fitted for all treatments! Use multitask_model_cate."
+            )
         _, T = self._expand_treatments(None, T)
         ind = inverse_onehot(T).item() - 1
         assert ind >= 0, "No model was fitted for the control"
@@ -582,7 +706,9 @@ class DRLearner(_OrthoLearner):
             monte carlo iterations, each element in the sublist corresponds to a crossfitting
             fold and is the model instance that was fitted for that training fold.
         """
-        return [[mdl._model_propensity for mdl in mdls] for mdls in super().models_nuisance_]
+        return [
+            [mdl._model_propensity for mdl in mdls] for mdls in super().models_nuisance_
+        ]
 
     @property
     def models_regression(self):
@@ -596,7 +722,9 @@ class DRLearner(_OrthoLearner):
             monte carlo iterations, each element in the sublist corresponds to a crossfitting
             fold and is the model instance that was fitted for that training fold.
         """
-        return [[mdl._model_regression for mdl in mdls] for mdls in super().models_nuisance_]
+        return [
+            [mdl._model_regression for mdl in mdls] for mdls in super().models_nuisance_
+        ]
 
     @property
     def nuisance_scores_propensity(self):
@@ -656,25 +784,44 @@ class DRLearner(_OrthoLearner):
     def fitted_models_final(self):
         return self.ortho_learner_model_final_.models_cate
 
-    def shap_values(self, X, *, feature_names=None, treatment_names=None, output_names=None, background_samples=100):
+    def shap_values(
+        self,
+        X,
+        *,
+        feature_names=None,
+        treatment_names=None,
+        output_names=None,
+        background_samples=100
+    ):
         if self.ortho_learner_model_final_._multitask_model_final:
-            return _shap_explain_multitask_model_cate(self.const_marginal_effect, self.multitask_model_cate, X,
-                                                      self._d_t, self._d_y,
-                                                      featurizer=self.featurizer_,
-                                                      feature_names=feature_names,
-                                                      treatment_names=treatment_names,
-                                                      output_names=output_names,
-                                                      input_names=self._input_names,
-                                                      background_samples=background_samples)
+            return _shap_explain_multitask_model_cate(
+                self.const_marginal_effect,
+                self.multitask_model_cate,
+                X,
+                self._d_t,
+                self._d_y,
+                featurizer=self.featurizer_,
+                feature_names=feature_names,
+                treatment_names=treatment_names,
+                output_names=output_names,
+                input_names=self._input_names,
+                background_samples=background_samples,
+            )
         else:
-            return _shap_explain_model_cate(self.const_marginal_effect, self.fitted_models_final,
-                                            X, self._d_t, self._d_y,
-                                            featurizer=self.featurizer_,
-                                            feature_names=feature_names,
-                                            treatment_names=treatment_names,
-                                            output_names=output_names,
-                                            input_names=self._input_names,
-                                            background_samples=background_samples)
+            return _shap_explain_model_cate(
+                self.const_marginal_effect,
+                self.fitted_models_final,
+                X,
+                self._d_t,
+                self._d_y,
+                featurizer=self.featurizer_,
+                feature_names=feature_names,
+                treatment_names=treatment_names,
+                output_names=output_names,
+                input_names=self._input_names,
+                background_samples=background_samples,
+            )
+
     shap_values.__doc__ = LinearCateEstimator.shap_values.__doc__
 
 
@@ -817,29 +964,34 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
 
     """
 
-    def __init__(self, *,
-                 model_propensity='auto',
-                 model_regression='auto',
-                 featurizer=None,
-                 fit_cate_intercept=True,
-                 min_propensity=1e-6,
-                 categories='auto',
-                 cv=2,
-                 mc_iters=None,
-                 mc_agg='mean',
-                 random_state=None):
+    def __init__(
+        self,
+        *,
+        model_propensity="auto",
+        model_regression="auto",
+        featurizer=None,
+        fit_cate_intercept=True,
+        min_propensity=1e-6,
+        categories="auto",
+        cv=2,
+        mc_iters=None,
+        mc_agg="mean",
+        random_state=None
+    ):
         self.fit_cate_intercept = fit_cate_intercept
-        super().__init__(model_propensity=model_propensity,
-                         model_regression=model_regression,
-                         model_final=None,
-                         featurizer=featurizer,
-                         multitask_model_final=False,
-                         min_propensity=min_propensity,
-                         categories=categories,
-                         cv=cv,
-                         mc_iters=mc_iters,
-                         mc_agg=mc_agg,
-                         random_state=random_state)
+        super().__init__(
+            model_propensity=model_propensity,
+            model_regression=model_regression,
+            model_final=None,
+            featurizer=featurizer,
+            multitask_model_final=False,
+            min_propensity=min_propensity,
+            categories=categories,
+            cv=cv,
+            mc_iters=mc_iters,
+            mc_agg=mc_agg,
+            random_state=random_state,
+        )
 
     def _gen_model_final(self):
         return StatsModelsLinearRegression(fit_intercept=self.fit_cate_intercept)
@@ -847,8 +999,20 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
     def _gen_ortho_learner_model_final(self):
         return _ModelFinal(self._gen_model_final(), self._gen_featurizer(), False)
 
-    def fit(self, Y, T, *, X=None, W=None, sample_weight=None, freq_weight=None, sample_var=None, groups=None,
-            cache_values=False, inference='auto'):
+    def fit(
+        self,
+        Y,
+        T,
+        *,
+        X=None,
+        W=None,
+        sample_weight=None,
+        freq_weight=None,
+        sample_var=None,
+        groups=None,
+        cache_values=False,
+        inference="auto"
+    ):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -887,9 +1051,18 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
         self: DRLearner instance
         """
         # Replacing fit from DRLearner, to add statsmodels inference in docstring
-        return super().fit(Y, T, X=X, W=W,
-                           sample_weight=sample_weight, freq_weight=freq_weight, sample_var=sample_var, groups=groups,
-                           cache_values=cache_values, inference=inference)
+        return super().fit(
+            Y,
+            T,
+            X=X,
+            W=W,
+            sample_weight=sample_weight,
+            freq_weight=freq_weight,
+            sample_var=sample_var,
+            groups=groups,
+            cache_values=cache_values,
+            inference=inference,
+        )
 
     @property
     def fit_cate_intercept_(self):
@@ -908,7 +1081,9 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
     @multitask_model_final.setter
     def multitask_model_final(self, value):
         if value:
-            raise ValueError("Parameter `multitask_model_final` cannot change from `False` for this estimator!")
+            raise ValueError(
+                "Parameter `multitask_model_final` cannot change from `False` for this estimator!"
+            )
 
     @property
     def model_final(self):
@@ -917,7 +1092,9 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
     @model_final.setter
     def model_final(self, model):
         if model is not None:
-            raise ValueError("Parameter `model_final` cannot be altered for this estimator!")
+            raise ValueError(
+                "Parameter `model_final` cannot be altered for this estimator!"
+            )
 
 
 class SparseLinearDRLearner(DebiasedLassoCateEstimatorDiscreteMixin, DRLearner):
@@ -1088,24 +1265,27 @@ class SparseLinearDRLearner(DebiasedLassoCateEstimatorDiscreteMixin, DRLearner):
 
     """
 
-    def __init__(self, *,
-                 model_propensity='auto',
-                 model_regression='auto',
-                 featurizer=None,
-                 fit_cate_intercept=True,
-                 alpha='auto',
-                 n_alphas=100,
-                 alpha_cov='auto',
-                 n_alphas_cov=10,
-                 max_iter=1000,
-                 tol=1e-4,
-                 n_jobs=None,
-                 min_propensity=1e-6,
-                 categories='auto',
-                 cv=2,
-                 mc_iters=None,
-                 mc_agg='mean',
-                 random_state=None):
+    def __init__(
+        self,
+        *,
+        model_propensity="auto",
+        model_regression="auto",
+        featurizer=None,
+        fit_cate_intercept=True,
+        alpha="auto",
+        n_alphas=100,
+        alpha_cov="auto",
+        n_alphas_cov=10,
+        max_iter=1000,
+        tol=1e-4,
+        n_jobs=None,
+        min_propensity=1e-6,
+        categories="auto",
+        cv=2,
+        mc_iters=None,
+        mc_agg="mean",
+        random_state=None
+    ):
         self.fit_cate_intercept = fit_cate_intercept
         self.alpha = alpha
         self.n_alphas = n_alphas
@@ -1114,34 +1294,48 @@ class SparseLinearDRLearner(DebiasedLassoCateEstimatorDiscreteMixin, DRLearner):
         self.max_iter = max_iter
         self.tol = tol
         self.n_jobs = n_jobs
-        super().__init__(model_propensity=model_propensity,
-                         model_regression=model_regression,
-                         model_final=None,
-                         featurizer=featurizer,
-                         multitask_model_final=False,
-                         min_propensity=min_propensity,
-                         categories=categories,
-                         cv=cv,
-                         mc_iters=mc_iters,
-                         mc_agg=mc_agg,
-                         random_state=random_state)
+        super().__init__(
+            model_propensity=model_propensity,
+            model_regression=model_regression,
+            model_final=None,
+            featurizer=featurizer,
+            multitask_model_final=False,
+            min_propensity=min_propensity,
+            categories=categories,
+            cv=cv,
+            mc_iters=mc_iters,
+            mc_agg=mc_agg,
+            random_state=random_state,
+        )
 
     def _gen_model_final(self):
-        return DebiasedLasso(alpha=self.alpha,
-                             n_alphas=self.n_alphas,
-                             alpha_cov=self.alpha_cov,
-                             n_alphas_cov=self.n_alphas_cov,
-                             fit_intercept=self.fit_cate_intercept,
-                             max_iter=self.max_iter,
-                             tol=self.tol,
-                             n_jobs=self.n_jobs,
-                             random_state=self.random_state)
+        return DebiasedLasso(
+            alpha=self.alpha,
+            n_alphas=self.n_alphas,
+            alpha_cov=self.alpha_cov,
+            n_alphas_cov=self.n_alphas_cov,
+            fit_intercept=self.fit_cate_intercept,
+            max_iter=self.max_iter,
+            tol=self.tol,
+            n_jobs=self.n_jobs,
+            random_state=self.random_state,
+        )
 
     def _gen_ortho_learner_model_final(self):
         return _ModelFinal(self._gen_model_final(), self._gen_featurizer(), False)
 
-    def fit(self, Y, T, *, X=None, W=None, sample_weight=None, groups=None,
-            cache_values=False, inference='auto'):
+    def fit(
+        self,
+        Y,
+        T,
+        *,
+        X=None,
+        W=None,
+        sample_weight=None,
+        groups=None,
+        cache_values=False,
+        inference="auto"
+    ):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -1174,13 +1368,25 @@ class SparseLinearDRLearner(DebiasedLassoCateEstimatorDiscreteMixin, DRLearner):
         """
         # TODO: support freq_weight and sample_var in debiased lasso
         # Replacing fit from DRLearner, to add debiasedlasso inference in docstring
-        check_high_dimensional(X, T, threshold=5, featurizer=self.featurizer,
-                               discrete_treatment=self.discrete_treatment,
-                               msg="The number of features in the final model (< 5) is too small for a sparse model. "
-                               "We recommend using the LinearDRLearner for this low-dimensional setting.")
-        return super().fit(Y, T, X=X, W=W,
-                           sample_weight=sample_weight, groups=groups,
-                           cache_values=cache_values, inference=inference)
+        check_high_dimensional(
+            X,
+            T,
+            threshold=5,
+            featurizer=self.featurizer,
+            discrete_treatment=self.discrete_treatment,
+            msg="The number of features in the final model (< 5) is too small for a sparse model. "
+            "We recommend using the LinearDRLearner for this low-dimensional setting.",
+        )
+        return super().fit(
+            Y,
+            T,
+            X=X,
+            W=W,
+            sample_weight=sample_weight,
+            groups=groups,
+            cache_values=cache_values,
+            inference=inference,
+        )
 
     @property
     def fit_cate_intercept_(self):
@@ -1193,7 +1399,9 @@ class SparseLinearDRLearner(DebiasedLassoCateEstimatorDiscreteMixin, DRLearner):
     @multitask_model_final.setter
     def multitask_model_final(self, value):
         if value:
-            raise ValueError("Parameter `multitask_model_final` cannot change from `False` for this estimator!")
+            raise ValueError(
+                "Parameter `multitask_model_final` cannot change from `False` for this estimator!"
+            )
 
     @property
     def model_final(self):
@@ -1202,11 +1410,13 @@ class SparseLinearDRLearner(DebiasedLassoCateEstimatorDiscreteMixin, DRLearner):
     @model_final.setter
     def model_final(self, model):
         if model is not None:
-            raise ValueError("Parameter `model_final` cannot be altered for this estimator!")
+            raise ValueError(
+                "Parameter `model_final` cannot be altered for this estimator!"
+            )
 
 
 class ForestDRLearner(ForestModelFinalCateEstimatorDiscreteMixin, DRLearner):
-    """ Instance of DRLearner with a :class:`~econml.grf.RegressionForest`
+    """Instance of DRLearner with a :class:`~econml.grf.RegressionForest`
     as a final model, so as to enable non-parametric inference.
 
     Parameters
@@ -1365,29 +1575,32 @@ class ForestDRLearner(ForestModelFinalCateEstimatorDiscreteMixin, DRLearner):
         by :mod:`np.random<numpy.random>`.
     """
 
-    def __init__(self, *,
-                 model_regression="auto",
-                 model_propensity="auto",
-                 featurizer=None,
-                 min_propensity=1e-6,
-                 categories='auto',
-                 cv=2,
-                 mc_iters=None,
-                 mc_agg='mean',
-                 n_estimators=1000,
-                 max_depth=None,
-                 min_samples_split=5,
-                 min_samples_leaf=5,
-                 min_weight_fraction_leaf=0.,
-                 max_features="auto",
-                 min_impurity_decrease=0.,
-                 max_samples=.45,
-                 min_balancedness_tol=.45,
-                 honest=True,
-                 subforest_size=4,
-                 n_jobs=-1,
-                 verbose=0,
-                 random_state=None):
+    def __init__(
+        self,
+        *,
+        model_regression="auto",
+        model_propensity="auto",
+        featurizer=None,
+        min_propensity=1e-6,
+        categories="auto",
+        cv=2,
+        mc_iters=None,
+        mc_agg="mean",
+        n_estimators=1000,
+        max_depth=None,
+        min_samples_split=5,
+        min_samples_leaf=5,
+        min_weight_fraction_leaf=0.0,
+        max_features="auto",
+        min_impurity_decrease=0.0,
+        max_samples=0.45,
+        min_balancedness_tol=0.45,
+        honest=True,
+        subforest_size=4,
+        n_jobs=-1,
+        verbose=0,
+        random_state=None
+    ):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
@@ -1401,41 +1614,104 @@ class ForestDRLearner(ForestModelFinalCateEstimatorDiscreteMixin, DRLearner):
         self.subforest_size = subforest_size
         self.n_jobs = n_jobs
         self.verbose = verbose
-        super().__init__(model_regression=model_regression,
-                         model_propensity=model_propensity,
-                         model_final=None,
-                         featurizer=featurizer,
-                         multitask_model_final=False,
-                         min_propensity=min_propensity,
-                         categories=categories,
-                         cv=cv,
-                         mc_iters=mc_iters,
-                         mc_agg=mc_agg,
-                         random_state=random_state)
+        super().__init__(
+            model_regression=model_regression,
+            model_propensity=model_propensity,
+            model_final=None,
+            featurizer=featurizer,
+            multitask_model_final=False,
+            min_propensity=min_propensity,
+            categories=categories,
+            cv=cv,
+            mc_iters=mc_iters,
+            mc_agg=mc_agg,
+            random_state=random_state,
+        )
 
     def _gen_model_final(self):
-        return RegressionForest(n_estimators=self.n_estimators,
-                                max_depth=self.max_depth,
-                                min_samples_split=self.min_samples_split,
-                                min_samples_leaf=self.min_samples_leaf,
-                                min_weight_fraction_leaf=self.min_weight_fraction_leaf,
-                                max_features=self.max_features,
-                                min_impurity_decrease=self.min_impurity_decrease,
-                                max_samples=self.max_samples,
-                                min_balancedness_tol=self.min_balancedness_tol,
-                                honest=self.honest,
-                                inference=True,
-                                subforest_size=self.subforest_size,
-                                n_jobs=self.n_jobs,
-                                random_state=self.random_state,
-                                verbose=self.verbose,
-                                warm_start=False)
+        return RegressionForest(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            min_samples_split=self.min_samples_split,
+            min_samples_leaf=self.min_samples_leaf,
+            min_weight_fraction_leaf=self.min_weight_fraction_leaf,
+            max_features=self.max_features,
+            min_impurity_decrease=self.min_impurity_decrease,
+            max_samples=self.max_samples,
+            min_balancedness_tol=self.min_balancedness_tol,
+            honest=self.honest,
+            inference=True,
+            subforest_size=self.subforest_size,
+            n_jobs=self.n_jobs,
+            random_state=self.random_state,
+            verbose=self.verbose,
+            warm_start=False,
+        )
 
     def _gen_ortho_learner_model_final(self):
         return _ModelFinal(self._gen_model_final(), self._gen_featurizer(), False)
 
-    def fit(self, Y, T, *, X=None, W=None, sample_weight=None, groups=None,
-            cache_values=False, inference='auto'):
+    @classmethod
+    def search_space(cls) -> dict:
+        """
+        Specify the hyperparameter search space for FLAML
+
+        Returns
+        -------
+        A FLAML-compatible search space for __init__ args we want to search over
+        """
+        return {
+            "min_propensity": tune.loguniform(1e-6, 1e-1),
+            # "mc_iters": tune.randint(0, 10), # is this worth searching over?
+            "n_estimators": tune.randint(2, 200),
+            # "max_depth": is tune.choice([None, tune.randint(2, 1000)]) the right syntax?
+            "min_samples_split": tune.randint(2, 20),
+            "min_samples_leaf": tune.randint(1, 25),
+            "min_weight_fraction_leaf": tune.uniform(0, 0.5),
+            "max_features": tune.choice(["auto", "sqrt", "log2", None]),
+            "min_impurity_decrease": tune.uniform(0, 10),
+            "max_samples": tune.uniform(0, 0.5),
+            "min_balancedness_tol": tune.uniform(0, 0.5),
+            "honest": tune.choice([0, 1]),
+            "subforest_size": tune.randint(2, 10),
+        }
+
+    @classmethod
+    def search_start(cls) -> dict:
+        """
+        Specify the default start point for hyperparameter search
+
+        Returns
+        -------
+        A dict of hyperparameter values consistent with the output from search_space()
+        """
+
+        return {
+            "min_propensity": 1e-6,
+            "n_estimators": 100,  # default is 1000 but that seems excessive
+            "min_samples_split": 5,
+            "min_samples_leaf": 5,
+            "min_weight_fraction_leaf": 0.0,
+            "max_features": "auto",
+            "min_impurity_decrease": 0.0,
+            "max_samples": 0.45,
+            "min_balancedness_tol": 0.45,
+            "honest": True,
+            "subforest_size": 4,
+        }
+
+    def fit(
+        self,
+        Y,
+        T,
+        *,
+        X=None,
+        W=None,
+        sample_weight=None,
+        groups=None,
+        cache_values=False,
+        inference="auto"
+    ):
         """
         Estimate the counterfactual model from data, i.e. estimates functions τ(·,·,·), ∂τ(·,·).
 
@@ -1469,9 +1745,16 @@ class ForestDRLearner(ForestModelFinalCateEstimatorDiscreteMixin, DRLearner):
         if X is None:
             raise ValueError("This estimator does not support X=None!")
 
-        return super().fit(Y, T, X=X, W=W,
-                           sample_weight=sample_weight, groups=groups,
-                           cache_values=cache_values, inference=inference)
+        return super().fit(
+            Y,
+            T,
+            X=X,
+            W=W,
+            sample_weight=sample_weight,
+            groups=groups,
+            cache_values=cache_values,
+            inference=inference,
+        )
 
     def multitask_model_cate(self):
         # Replacing to remove docstring
@@ -1484,7 +1767,9 @@ class ForestDRLearner(ForestModelFinalCateEstimatorDiscreteMixin, DRLearner):
     @multitask_model_final.setter
     def multitask_model_final(self, value):
         if value:
-            raise ValueError("Parameter `multitask_model_final` cannot change from `False` for this estimator!")
+            raise ValueError(
+                "Parameter `multitask_model_final` cannot change from `False` for this estimator!"
+            )
 
     @property
     def model_final(self):
@@ -1493,4 +1778,6 @@ class ForestDRLearner(ForestModelFinalCateEstimatorDiscreteMixin, DRLearner):
     @model_final.setter
     def model_final(self, model):
         if model is not None:
-            raise ValueError("Parameter `model_final` cannot be altered for this estimator!")
+            raise ValueError(
+                "Parameter `model_final` cannot be altered for this estimator!"
+            )
